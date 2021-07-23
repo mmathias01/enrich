@@ -25,7 +25,7 @@ import cats.implicits._
 
 import cats.effect.{Clock, Concurrent, ContextShift, Sync}
 
-import fs2.Stream
+import fs2.{Pipe, Stream}
 
 import _root_.io.sentry.SentryClient
 
@@ -71,18 +71,26 @@ object Enrich {
    * [[Assets.State.make]] downloads assets for the first time unconditionally during
    * [[Environment]] initialisation, then if `assetsUpdatePeriod` has been specified -
    * they'll be refreshed periodically by [[Assets.updateStream]]
+   *
+   * @param ordered indicates whether the events should be processed ordered or not
    */
-  def run[F[_]: Concurrent: ContextShift: Clock: Parallel](env: Environment[F]): Stream[F, Unit] = {
+  def run[F[_]: Concurrent: ContextShift: Clock: Parallel](env: Environment[F], ordered: Boolean = false): Stream[F, Unit] = {
     val registry: F[EnrichmentRegistry[F]] = env.enrichments.get.map(_.registry)
     val enrich: Enrich[F] = {
       implicit val rl: RegistryLookup[F] = env.registryLookup
       enrichWith[F](registry, env.igluClient, env.sentry, env.metrics.enrichLatency, env.processor)
     }
 
+    val enrichPipe: Pipe[F, Payload[F, Array[Byte]], Result[F]] =
+      if(ordered)
+        _.parEvalMapUnordered(ConcurrencyLevel)(enrich)
+      else
+        _.parEvalMap(ConcurrencyLevel)(enrich)
+
     env.source
       .pauseWhen(env.pauseEnrich)
       .evalTap(_ => env.metrics.rawCount)
-      .parEvalMapUnordered(ConcurrencyLevel)(enrich)
+      .through(enrichPipe)
       .through(Payload.sinkAll(sinkResult(env)))
   }
 
