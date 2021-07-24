@@ -73,7 +73,7 @@ object Sink {
       case (Authentication.Gcp, o: Output.PubSub) =>
         pubsubSink[F, Array[Byte]](o).map(sink => bytes => sink(AttributedData(bytes, Map.empty)))
       case (_, o: Output.FileSystem) =>
-        CSink.fileSink(o.file, blocker)
+        CSink.fileSink(o, blocker)
     }
 
   def initAttributedSink[F[_]: Concurrent: ContextShift: Timer](
@@ -85,7 +85,7 @@ object Sink {
       case (Authentication.Gcp, o: Output.PubSub) =>
         pubsubSink[F, Array[Byte]](o)
       case (_, o: Output.FileSystem) =>
-        CSink.fileSink(o.file, blocker).map(sink => row => sink(row.data))
+        CSink.fileSink(o, blocker).map(sink => row => sink(row.data))
     }
 
   def pubsubSink[F[_]: Concurrent, A: MessageEncoder](
