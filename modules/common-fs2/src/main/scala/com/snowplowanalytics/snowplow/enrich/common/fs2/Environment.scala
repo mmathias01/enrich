@@ -22,6 +22,7 @@ import cats.effect.{Async, Blocker, Clock, Concurrent, ConcurrentEffect, Context
 import cats.effect.concurrent.Ref
 
 import fs2.concurrent.SignallingRef
+import fs2.{Pipe, Stream}
 
 import _root_.io.circe.Json
 
@@ -71,17 +72,19 @@ import scala.concurrent.ExecutionContext
  * @param piiAttributes       fields from a PII event to use as output message attributes
  * @param processor           identifies enrich assets in bad rows
  */
-final case class Environment[F[_]](
+final case class Environment[F[_], A](
   igluClient: Client[F, Json],
   registryLookup: RegistryLookup[F],
   enrichments: Ref[F, Environment.Enrichments[F]],
   pauseEnrich: SignallingRef[F, Boolean],
   assetsState: Assets.State[F],
   blocker: Blocker,
-  source: RawSource[F],
+  source: Stream[F, A],
   good: AttributedByteSink[F],
   pii: Option[AttributedByteSink[F]],
   bad: ByteSink[F],
+  checkpointer: Pipe[F, A, Unit],
+  getPayload: A => Array[Byte],
   sentry: Option[SentryClient],
   metrics: Metrics[F],
   assetsUpdatePeriod: Option[FiniteDuration],
@@ -120,15 +123,17 @@ object Environment {
   }
 
   /** Initialize and allocate all necessary resources */
-  def make[F[_]: ConcurrentEffect: ContextShift: Clock: Timer](
+  def make[F[_]: ConcurrentEffect: ContextShift: Clock: Timer, A](
     ec: ExecutionContext,
     config: CliConfig,
-    mkRawSource: (Blocker, Authentication, Input) => RawSource[F],
+    mkRawSource: (Blocker, Authentication, Input) => Stream[F, A],
     mkGoodSink: (Blocker, Authentication, Output) => Resource[F, AttributedByteSink[F]],
     mkPiiSink: (Blocker, Authentication, Output) => Resource[F, AttributedByteSink[F]],
     mkBadSink: (Blocker, Authentication, Output) => Resource[F, ByteSink[F]],
+    checkpointer: Pipe[F, A, Unit],
+    getPayload: A => Array[Byte],
     processor: Processor
-  ): Parsed[F, Resource[F, Environment[F]]] =
+  ): Parsed[F, Resource[F, Environment[F, A]]] =
     ParsedConfigs.parse[F](config).map { parsedConfigs =>
       val file = parsedConfigs.configFile
       for {
@@ -150,7 +155,7 @@ object Environment {
                     case None => Resource.pure[F, Option[SentryClient]](none[SentryClient])
                   }
         _ <- Resource.eval(pauseEnrich.set(false) *> Logger[F].info("Enrich environment initialized"))
-      } yield Environment[F](
+      } yield Environment[F, A](
         client,
         Http4sRegistryLookup(http),
         enrichments,
@@ -161,6 +166,8 @@ object Environment {
         goodSink,
         piiSink,
         badSink,
+        checkpointer,
+        getPayload,
         sentry,
         metrics,
         file.assetsUpdatePeriod,

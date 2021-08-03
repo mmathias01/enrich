@@ -27,14 +27,14 @@ package object fs2 {
   type ValidationResult[A] = ValidatedNel[String, A]
 
   /** Raw Thrift payloads coming from a collector */
-  type RawSource[F[_]] = Stream[F, Payload[F, Array[Byte]]]
+  type RawSource[F[_]] = Stream[F, Array[Byte]]
 
   type ByteSink[F[_]] = Array[Byte] => F[Unit]
   type AttributedByteSink[F[_]] = AttributedData[Array[Byte]] => F[Unit]
 
   /** Enrichment result, containing list of (valid and invalid) results */
-  type Result[F[_]] = Payload[F, List[Validated[BadRow, EnrichedEvent]]]
+  type Result = List[Validated[BadRow, EnrichedEvent]]
 
   /** Function to transform an origin raw payload into good and/or bad rows */
-  type Enrich[F[_]] = Payload[F, Array[Byte]] => F[Result[F]]
+  type Enrich[F[_]] = Array[Byte] => F[Result]
 }

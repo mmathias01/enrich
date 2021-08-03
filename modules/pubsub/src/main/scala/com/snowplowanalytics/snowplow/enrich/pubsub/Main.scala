@@ -25,6 +25,10 @@ import java.util.concurrent.{Executors, TimeUnit}
 
 import scala.concurrent.ExecutionContext
 
+import com.permutive.pubsub.consumer.ConsumerRecord
+
+import fs2.Pipe
+
 import com.snowplowanalytics.snowplow.badrows.Processor
 
 import com.snowplowanalytics.snowplow.enrich.common.fs2.config.CliConfig
@@ -63,14 +67,24 @@ object Main extends IOApp.WithContext {
           _ <- logger.info("Initialising resources for Enrich job")
           environment <-
             Environment
-              .make[IO](executionContext, cfg, Source.init, Sink.initAttributedSink, Sink.initAttributedSink, Sink.init, processor)
+              .make[IO, ConsumerRecord[IO, Array[Byte]]](
+                executionContext,
+                cfg,
+                Source.init,
+                Sink.initAttributedSink,
+                Sink.initAttributedSink,
+                Sink.init,
+                checkpointer,
+                _.value,
+                processor
+              )
               .value
           exit <- environment match {
                     case Right(e) =>
                       e.use { env =>
                         val log = logger.info("Running enrichment stream")
-                        val enrich = Enrich.run[IO](env)
-                        val updates = Assets.run[IO](env)
+                        val enrich = Enrich.run[IO, ConsumerRecord[IO, Array[Byte]]](env, false)
+                        val updates = Assets.run[IO, ConsumerRecord[IO, Array[Byte]]](env)
                         val reporting = env.metrics.report
                         val flow = enrich.merge(updates).merge(reporting)
                         log >> flow.compile.drain.attempt.flatMap {
@@ -88,6 +102,9 @@ object Main extends IOApp.WithContext {
       case Left(error) =>
         IO(System.err.println(error)).as(ExitCode.Error)
     }
+
+  private def checkpointer[F[_]]: Pipe[F, ConsumerRecord[F, Array[Byte]], Unit] =
+    _.evalMap(_.ack)
 
   /** Last attempt to notify about an exception (possibly just interruption) */
   private def unsafeSendSentry(error: Throwable, sentry: Option[SentryClient]): Unit = {

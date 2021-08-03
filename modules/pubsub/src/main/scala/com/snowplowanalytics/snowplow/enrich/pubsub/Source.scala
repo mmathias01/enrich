@@ -14,14 +14,14 @@ package com.snowplowanalytics.snowplow.enrich.pubsub
 
 import cats.effect.{Blocker, Concurrent, ContextShift, Sync}
 
-import com.permutive.pubsub.consumer.Model
+import com.permutive.pubsub.consumer.{ConsumerRecord, Model}
 import com.permutive.pubsub.consumer.grpc.{PubsubGoogleConsumer, PubsubGoogleConsumerConfig}
 
 import com.google.pubsub.v1.PubsubMessage
 
-import com.snowplowanalytics.snowplow.enrich.common.fs2.{Payload, RawSource}
+import fs2.Stream
+
 import com.snowplowanalytics.snowplow.enrich.common.fs2.config.io.{Authentication, Input}
-import com.snowplowanalytics.snowplow.enrich.common.fs2.io.{Source => CSource}
 
 import cats.effect.{Blocker, ContextShift, Sync}
 
@@ -51,18 +51,18 @@ object Source {
     blocker: Blocker,
     auth: Authentication,
     input: Input
-  ): RawSource[F] =
+  ): Stream[F, ConsumerRecord[F, Array[Byte]]] =
     (auth, input) match {
       case (Authentication.Gcp, p: Input.PubSub) =>
         pubSub(blocker, p)
-      case (_, p: Input.FileSystem) =>
-        CSource.filesystem(blocker, p.dir)
+      case (auth, input) =>
+        throw new IllegalArgumentException(s"Auth $auth is not GCP and/or input $input is not PubSub")
     }
 
   def pubSub[F[_]: Concurrent: ContextShift](
     blocker: Blocker,
     input: Input.PubSub
-  ): RawSource[F] = {
+  ): Stream[F, ConsumerRecord[F, Array[Byte]]] = {
     val onFailedTerminate: Throwable => F[Unit] =
       e => Sync[F].delay(System.err.println(s"Cannot terminate ${e.getMessage}"))
     val pubSubConfig =
@@ -78,6 +78,5 @@ object Source {
         Sync[F].delay(System.err.println(s"Cannot decode message ${message.getMessageId} into array of bytes. ${error.getMessage}"))
     PubsubGoogleConsumer
       .subscribe[F, Array[Byte]](blocker, projectId, subscriptionId, errorHandler, pubSubConfig)
-      .map(record => Payload(record.value, record.ack))
   }
 }

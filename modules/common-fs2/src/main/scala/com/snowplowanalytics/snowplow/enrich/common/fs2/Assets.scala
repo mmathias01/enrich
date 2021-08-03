@@ -146,7 +146,7 @@ object Assets {
   type Asset = (URI, String)
 
   /** Initialise the [[updateStream]] with all necessary resources if refresh period is specified */
-  def run[F[_]: ConcurrentEffect: ContextShift: Timer: Parallel](env: Environment[F]): Stream[F, Unit] =
+  def run[F[_]: ConcurrentEffect: ContextShift: Timer: Parallel, A](env: Environment[F, A]): Stream[F, Unit] =
     env.assetsUpdatePeriod match {
       case Some(duration) =>
         val init = for {

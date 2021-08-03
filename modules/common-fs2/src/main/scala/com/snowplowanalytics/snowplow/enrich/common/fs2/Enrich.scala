@@ -74,30 +74,32 @@ object Enrich {
    *
    * @param ordered indicates whether the events should be processed ordered or not
    */
-  def run[F[_]: Concurrent: ContextShift: Clock: Parallel](env: Environment[F], ordered: Boolean = false): Stream[F, Unit] = {
+  def run[F[_]: Concurrent: ContextShift: Clock: Parallel, A](env: Environment[F, A], ordered: Boolean = false): Stream[F, Unit] = {
     val registry: F[EnrichmentRegistry[F]] = env.enrichments.get.map(_.registry)
     val enrich: Enrich[F] = {
       implicit val rl: RegistryLookup[F] = env.registryLookup
       enrichWith[F](registry, env.igluClient, env.sentry, env.metrics.enrichLatency, env.processor)
     }
 
-    val enrichPipe: Pipe[F, Payload[F, Array[Byte]], Result[F]] =
+    val enrichPipe: Pipe[F, (A, Array[Byte]), (A, Result)] =
       if(ordered)
-        _.parEvalMapUnordered(ConcurrencyLevel)(enrich)
+        _.parEvalMapUnordered(ConcurrencyLevel){ case (orig, bytes) => enrich(bytes).map((orig, _)) }
       else
-        _.parEvalMap(ConcurrencyLevel)(enrich)
+        _.parEvalMap(ConcurrencyLevel){ case (orig, bytes) => enrich(bytes).map((orig, _)) }
 
     env.source
       .pauseWhen(env.pauseEnrich)
       .evalTap(_ => env.metrics.rawCount)
+      .map(a => (a, env.getPayload(a)))
       .through(enrichPipe)
-      .through(Payload.sinkAll(sinkResult(env)))
+      .through(sinkAll(sinkResult(env)))
+      .through(env.checkpointer)
   }
 
   /**
    * Enrich a single `CollectorPayload` to get list of bad rows and/or enriched events
    *
-   * Along with actual `ack` the `enrichLatency` gauge will be updated
+   * enrichLatency` gauge will be updated
    */
   def enrichWith[F[_]: Clock: Sync: ContextShift: RegistryLookup](
     enrichRegistry: F[EnrichmentRegistry[F]],
@@ -106,9 +108,9 @@ object Enrich {
     enrichLatency: Option[Long] => F[Unit],
     processor: Processor
   )(
-    row: Payload[F, Array[Byte]]
-  ): F[Result[F]] = {
-    val payload = ThriftLoader.toCollectorPayload(row.data, processor)
+    row: Array[Byte]
+  ): F[Result] = {
+    val payload = ThriftLoader.toCollectorPayload(row, processor)
     val collectorTstamp = payload.toOption.flatMap(_.flatMap(_.context.timestamp).map(_.getMillis))
 
     val result =
@@ -117,8 +119,8 @@ object Enrich {
         etlTstamp <- Clock[F].realTime(TimeUnit.MILLISECONDS).map(millis => new DateTime(millis))
         registry <- enrichRegistry
         enriched <- EtlPipeline.processEvents[F](adapterRegistry, registry, igluClient, processor, etlTstamp, payload)
-        trackLatency = enrichLatency(collectorTstamp)
-      } yield Payload(enriched, trackLatency *> row.finalise)
+        _ <- enrichLatency(collectorTstamp)
+      } yield enriched
 
     result.handleErrorWith(sendToSentry[F](row, sentry, processor))
   }
@@ -129,20 +131,19 @@ object Enrich {
 
   /** Log an error, turn the problematic `CollectorPayload` into `BadRow` and notify Sentry if configured */
   def sendToSentry[F[_]: Sync: Clock]
-      (original: Payload[F, Array[Byte]], sentry: Option[SentryClient], processor: Processor)
-      (error: Throwable): F[Result[F]] =
+      (original: Array[Byte], sentry: Option[SentryClient], processor: Processor)
+      (error: Throwable): F[Result] =
     for {
       _ <- Logger[F].error("Runtime exception during payload enrichment. CollectorPayload converted to generic_error and ack'ed")
       now <- Clock[F].realTime(TimeUnit.MILLISECONDS).map(Instant.ofEpochMilli)
-      _ <- original.finalise
-      badRow = genericBadRow(original.data, now, error, processor)
+      badRow = genericBadRow(original, now, error, processor)
       _ <- sentry match {
              case Some(client) =>
                Sync[F].delay(client.sendException(error))
              case None =>
                Sync[F].unit
            }
-    } yield Payload(List(badRow.invalid), Sync[F].unit)
+    } yield List(badRow.invalid)
 
   /** Build a `generic_error` bad row for unhandled runtime errors */
   def genericBadRow(
@@ -157,17 +158,17 @@ object Enrich {
     BadRow.GenericError(processor, failure, rawPayload)
   }
 
-  def sinkBad[F[_]: Monad](env: Environment[F], bad: BadRow): F[Unit] =
+  def sinkBad[F[_]: Monad, A](env: Environment[F, A], bad: BadRow): F[Unit] =
     env.metrics.badCount >> env.bad(bad.compact.getBytes(UTF_8))
 
-  def sinkGood[F[_]: Concurrent: Parallel](env: Environment[F], enriched: EnrichedEvent): F[Unit] =
+  def sinkGood[F[_]: Concurrent: Parallel, A](env: Environment[F,A], enriched: EnrichedEvent): F[Unit] =
     serializeEnriched(enriched, env.processor) match {
       case Left(br) => sinkBad(env, br)
       case Right(bytes) =>
         List(env.metrics.goodCount, env.good(AttributedData(bytes, env.goodAttributes(enriched))), sinkPii(env, enriched)).parSequence_
     }
 
-  def sinkPii[F[_]: Monad](env: Environment[F], enriched: EnrichedEvent): F[Unit] =
+  def sinkPii[F[_]: Monad, A](env: Environment[F, A], enriched: EnrichedEvent): F[Unit] =
     (for {
       piiSink <- env.pii
       pii <- ConversionUtils.getPiiEvent(env.processor, enriched)
@@ -192,7 +193,10 @@ object Enrich {
     } else Right(asBytes)
   }
 
-  def sinkResult[F[_]: Concurrent: Parallel](env: Environment[F])(result: Validated[BadRow, EnrichedEvent]): F[Unit] =
+  def sinkAll[F[_]: Concurrent: Parallel, A, B](f: B => F[Unit]): Pipe[F, (A, List[B]), A] =
+    _.parEvalMap(SinkConcurrency){case (a, bs) => bs.parTraverse_(f).map(_ => a)}
+
+  def sinkResult[F[_]: Concurrent: Parallel, A](env: Environment[F, A])(result: Validated[BadRow, EnrichedEvent]): F[Unit] =
     result.fold(sinkBad(env, _), sinkGood(env, _))
 
   /**
@@ -206,4 +210,14 @@ object Enrich {
   /** The maximum substring of the message that we write into a SizeViolation bad row */
   private val MaxErrorMessageSize = MaxRecordSize / 10
 
+  /**
+   * Controls the maximum number of events we can be waiting to get sunk
+   *
+   *  For the Pubsub sink this should at least exceed the number events we can sink within
+   *  `Sink.DefaultDelayThreshold`.
+   *
+   *  For the FileSystem source this is the primary way that we control the memory footprint of the
+   *  app.
+   */
+  private val SinkConcurrency = 10000
 }
