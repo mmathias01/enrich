@@ -37,6 +37,7 @@ class JavascriptScriptEnrichmentSpec extends Specification {
   Javascript enrichment should be able to proceed without return statement           $e9
   Javascript enrichment should be able to proceed with return null                   $e10
   Javascript enrichment should be able to update the fields without return statement $e11
+  Javascript enrichment should be able to run regexes                                $e12
   """
 
   val schemaKey =
@@ -168,6 +169,83 @@ class JavascriptScriptEnrichmentSpec extends Specification {
       }"""
     JavascriptScriptEnrichment(schemaKey, function).process(enriched)
     enriched.app_id must beEqualTo(newAppId)
+  }
+
+  def e12 = {
+    val enriched = buildEnriched()
+
+    val origin = "https://example.slice.is/landing?jwt=a0.1b.33&foo=bar"
+    val filtered = "https://example.slice.is/landing?jwt=****&foo=bar"
+    val noToken = "https://example.slice.is/landing?foo=bar"
+    enriched.page_url = origin
+    enriched.page_urlquery = noToken
+
+    val function = s"""
+    function process(event) {
+      var page_url = '';
+      var page_urlquery = '';
+      var page_referrer = '';
+      var refr_urlquery = '';
+
+      var page_url_jwt = '';
+      var page_urlquery_jwt = '';
+      var page_referrer_jwt = '';
+      var refr_urlquery_jwt = '';
+
+      var regex = /.*jwt=([A-Za-z0-9-_=]+\\.[A-Za-z0-9-_=]+\\.?[A-Za-z0-9-_.+/=]*)&+/;
+
+      try {
+        page_url = event.getPage_url();
+        page_urlquery = event.getPage_urlquery();
+        page_referrer = event.getPage_referrer();
+        refr_urlquery = event.getRefr_urlquery();
+      } catch(err) {};
+
+
+      try {
+        page_url_jwt = page_url.match(regex) && page_url.match(regex)[1];
+      } catch(err) {};
+
+      try {
+        page_urlquery_jwt = page_urlquery.match(regex) && page_urlquery.match(regex)[1];
+      } catch(err) {};
+
+      try {
+        page_referrer_jwt = page_referrer.match(regex) && page_referrer.match(regex)[1];
+      } catch(err) {};
+
+      try {
+        refr_urlquery_jwt = refr_urlquery.match(regex) && refr_urlquery.match(regex)[1];
+      } catch(err) {};
+
+      if (page_url){
+        var updated_page_url = page_url.replace(page_url_jwt, '****');
+        event.setPage_url(new String(updated_page_url));
+      }
+
+      if (page_urlquery){
+        var updated_page_urlquery = page_urlquery.replace(page_urlquery_jwt, '****');
+        event.setPage_urlquery(new String(updated_page_urlquery));
+      }
+
+      if (page_referrer){
+        var updated_page_referrer = page_referrer.replace(page_referrer_jwt, '****');
+        event.setPage_referrer(new String(updated_page_referrer));
+      }
+
+      if (refr_urlquery){
+        var updated_refr_urlquery = refr_urlquery.replace(refr_urlquery_jwt, '****');
+        event.setRefr_urlquery(new String(updated_refr_urlquery));
+      }
+    }"""
+
+    JavascriptScriptEnrichment(schemaKey, function).process(enriched)
+
+    val one = enriched.page_url must beEqualTo(filtered)
+    val two = enriched.page_urlquery must beEqualTo(noToken)
+    val three = enriched.page_referrer must beEqualTo(null)
+    val four = enriched.refr_urlquery must beEqualTo(null)
+    one and two and three and four
   }
 
   def buildEnriched(appId: String = "my super app"): EnrichedEvent = {
