@@ -174,8 +174,8 @@ class JavascriptScriptEnrichmentSpec extends Specification {
   def e12 = {
     val enriched = buildEnriched()
 
-    val origin = "https://example.slice.is/landing?jwt=a0.1b.33&foo=bar"
-    val filtered = "https://example.slice.is/landing?jwt=****&foo=bar"
+    val origin = "https://example.slice.is/landing?jwt=eyJ0-_rjy_-eXA.765htRERF44_5f-FEFEiOiKKV1Qw.867G--_5343GG"
+    val filtered = "https://example.slice.is/landing?jwt=****"
     val noToken = "https://example.slice.is/landing?foo=bar"
     enriched.page_url = origin
     enriched.page_urlquery = noToken
@@ -192,7 +192,7 @@ class JavascriptScriptEnrichmentSpec extends Specification {
       var page_referrer_jwt = '';
       var refr_urlquery_jwt = '';
 
-      var regex = /.*jwt=([A-Za-z0-9-_=]+\\.[A-Za-z0-9-_=]+\\.?[A-Za-z0-9-_.+/=]*)&+/;
+      var regex = /.*jwt=([A-Za-z0-9-_=]+\\.[A-Za-z0-9-_=]+\\.?[A-Za-z0-9-_.+/=]*)&?/;
 
       try {
         page_url = event.getPage_url();
